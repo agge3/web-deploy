@@ -1,0 +1,12 @@
+[Unit]
+Description=gunicorn daemon for $APP_USER
+After=network.target
+
+[Service]
+User=$APP_USER
+Group=$APP_USER
+WorkingDirectory=$APP_HOME/$PY_DIR
+ExecStart=$VENV_DIR/bin/gunicorn --workers 3 --bind unix:$APP_HOME/gunicorn.sock app:app
+
+[Install]
+WantedBy=multi-user.target
