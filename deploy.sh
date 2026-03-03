@@ -188,6 +188,11 @@ while getopts "hvsd:uk:" opt; do
 	esac
 done
 
+if [[ "$SSHPASS_DEPLOY" == true ]] && ! command -v sshpass &>/dev/null; then
+	echo "sshpass is required but not installed"
+	exit 1
+fi
+
 if [[ -z "$DISTRO" ]]; then
 	DISTRO="$(detect_distro)"
 fi
@@ -371,7 +376,7 @@ if [[ $SSHKEY_DEPLOY == true || $SSHPASS_DEPLOY == true ]]; then
 	ilog "shipping build to remote..."
 	my_scp \
 		"$(git rev-parse --show-toplevel)/application/frontend/dist" \
-		"$APP_HOME/$NODE_DIR/dist"
+		"$APP_HOME/$NODE_DIR"
 
 	# give APP_USER ownership, after ROOT_USER deployed
 	cmd_as "$ROOT_UNAME" "chown -R $APP_USER:$APP_USER $APP_HOME/$NODE_DIR/dist"
@@ -384,32 +389,43 @@ else
 	fi
 fi
 
-# validate db:
-# run db with init
+# validate db
+# start mysql/mariadb
 cmd_as "$ROOT_UNAME" "systemctl enable --now mysql || systemctl enable --now mariadb"
 
-# check if db has tables, create db over UNIX socket if not
-if ! cmd_as "$DB_USER" "$MYSQL -e 'SELECT 1'" &>/dev/null; then
-	ilog "creating mysql user: $DB_USER (auth_socket)"
-	cmd_as "$ROOT_UNAME" \
-		"$MYSQL -e \"CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED WITH auth_socket; FLUSH PRIVILEGES;\""
-fi
+# create mysql admin user (or update auth if it already exists)
+ilog "ensuring mysql user: $DB_UNAME"
+cmd_as "$ROOT_UNAME" \
+	"$MYSQL -e \"CREATE USER IF NOT EXISTS '$DB_UNAME'@'localhost' IDENTIFIED WITH caching_sha2_password BY '$DB_PWD';\""
+cmd_as "$ROOT_UNAME" \
+	"$MYSQL -e \"ALTER USER '$DB_UNAME'@'localhost' IDENTIFIED WITH caching_sha2_password BY '$DB_PWD'; FLUSH PRIVILEGES;\""
 
-# check if db has an admin user, assign as DB_UNAME if not
-if ! cmd_as "$DB_USER" "$MYSQL -e \"USE $DB_UNAME\"" &>/dev/null; then
-	# xxx this proceeds even though database already exists!
-	ilog "creating database: $DB_NAME"
-	# xxx guard on db level too
-	cmd_as "$ROOT_UNAME" \
-		"$MYSQL -e \"CREATE DATABASE IF NOT EXISTS $DB_NAME; GRANT ALL PRIVILEGES ON $DB_UNAME.* TO '$DB_USER'@'localhost'; FLUSH PRIVILEGES;\""
-fi
+# create database
+ilog "ensuring database: $DB_NAME"
+cmd_as "$ROOT_UNAME" \
+	"$MYSQL -e \"CREATE DATABASE IF NOT EXISTS $DB_NAME;\""
+cmd_as "$ROOT_UNAME" \
+	"$MYSQL -e \"GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_UNAME'@'localhost'; FLUSH PRIVILEGES;\""
+
+# sed prod values into backend .env
+ENV_FILE="$APP_HOME/$REPO_DIR/application/backend/.env"
+ilog "updating backend .env with prod values"
+cmd_as "$ROOT_UNAME" \
+	"sed -i 's|^DATABASE_URL=.*|DATABASE_URL=mysql+pymysql://${DB_UNAME}:${DB_PWD}@localhost/${DB_NAME}?unix_socket=/var/run/mysqld/mysqld.sock|' $ENV_FILE"
+cmd_as "$ROOT_UNAME" \
+	"sed -i 's|^FRONTEND_URL=.*|FRONTEND_URL=https://${MY_HOSTNAME}|' $ENV_FILE"
+
+# run migrations and seed
+ilog "running database setup (migrations + seed)..."
+cmd_as "$APP_USER" \
+	"cd $REPO_DIR/application && source $VENV_DIR/bin/activate && python backend/setup_db.py"
 
 # idempotent deploy nginx (always take repo as source of truth):
 NGINX_CONF="/etc/nginx/sites-available/$APP_USER"
 NGINX_ENABLED="/etc/nginx/sites-enabled/$APP_USER"
 # export for envsubst
-export APP_USER APP_HOME NODE_DIR MY_HOSTNAME
-NGINX_VARS='$APP_USER $APP_HOME $NODE_DIR $MY_HOSTNAME'
+export APP_USER APP_HOME NODE_DIR PY_DIR MY_HOSTNAME
+NGINX_VARS='$APP_USER $APP_HOME $NODE_DIR $PY_DIR $MY_HOSTNAME'
 
 # remove default if it exists
 if ! cmd_as "$ROOT_UNAME" "test -f $NGINX_CONF"; then
@@ -437,8 +453,8 @@ cmd_as "$ROOT_UNAME" "nginx -t && systemctl restart nginx"
 
 # idempotent deploy gunicorn (always take repo as source of truth):
 # export for envsubst
-export APP_USER APP_HOME VENV_DIR PY_DIR
-GUNICORN_VARS='$APP_USER $APP_HOME $VENV_DIR $PY_DIR'
+export APP_USER APP_HOME VENV_DIR PY_DIR REPO_DIR
+GUNICORN_VARS='$APP_USER $APP_HOME $VENV_DIR $PY_DIR $REPO_DIR'
 
 # deploy gunicorn service from repo
 ilog "installing gunicorn service..."

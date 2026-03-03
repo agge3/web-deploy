@@ -5,8 +5,8 @@ After=network.target
 [Service]
 User=$APP_USER
 Group=$APP_USER
-WorkingDirectory=$APP_HOME/$PY_DIR
-ExecStart=$VENV_DIR/bin/gunicorn --workers 3 --bind unix:$APP_HOME/gunicorn.sock app:app
+WorkingDirectory=$APP_HOME/$REPO_DIR/application
+ExecStart=$VENV_DIR/bin/gunicorn --workers 3 --bind unix:$APP_HOME/gunicorn.sock "backend.app:create_app()"
 
 [Install]
 WantedBy=multi-user.target
